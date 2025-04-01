@@ -1,5 +1,6 @@
 package com.github.tvbox.osc.ui.activity;
 
+import android.Manifest;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.IntEvaluator;
@@ -1457,25 +1458,33 @@ public class LivePlayActivity extends BaseActivity {
 
             @Override
             public void playStateChanged(int playState) {
+                mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
                 switch (playState) {
                     case VideoView.STATE_IDLE:
+                        // 空闲状态：播放器处于空闲，尚未开始播放。一般不需要自动换源。
                     case VideoView.STATE_PAUSED:
+                        // 暂停状态：播放被暂停，通常是用户操作，不触发自动换源
                         break;
                     case VideoView.STATE_PREPARED:
+                        // 准备就绪：播放器已经加载好媒体数据，但尚未开始播放。
                     case VideoView.STATE_BUFFERED:
                     case VideoView.STATE_PLAYING:
+                        // 播放状态：当播放器缓冲完成或正在正常播放时，表明当前源是可用的，
                         currentLiveChangeSourceTimes = 0;
-                        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
                         break;
                     case VideoView.STATE_ERROR:
                     case VideoView.STATE_PLAYBACK_COMPLETED:
-                        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
-                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, 3000);
+                        // 错误或播放结束状态：播放器遇到错误或播放完毕时，
+                        // 启动自动换源任务，等待3秒后尝试切换至备选源
+                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, 3500);
                         break;
                     case VideoView.STATE_PREPARING:
                     case VideoView.STATE_BUFFERING:
-                        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
-                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, (Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000);
+                        // 正在准备或缓冲状态：表示当前源正在加载中
+                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, (Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000L);
+                        break;
+                    default:
+                        LOG.i("echo-Unexpected live_play state: " + playState);
                         break;
                 }
             }
@@ -1798,28 +1807,16 @@ public class LivePlayActivity extends BaseActivity {
                 break;
             case 5://多源切换
                 //TODO
-                if(position==Hawk.get(HawkConfig.LIVE_GROUP_INDEX, 0))break;
-                JsonArray live_groups=Hawk.get(HawkConfig.LIVE_GROUP_LIST,new JsonArray());
-                JsonObject livesOBJ = live_groups.get(position).getAsJsonObject();
-                if(livesOBJ.has("type")){
-                    String type= livesOBJ.get("type").getAsString();
-                    if(!type.equals("0") && !type.equals("3")){
-                        Toast.makeText(App.getInstance(), "暂不支持该直播类型", Toast.LENGTH_SHORT).show();
-                        break;
-                    }
-                }else {
-                    if(!livesOBJ.has("channels")){
-                        Toast.makeText(App.getInstance(), "暂不支持该直播类型", Toast.LENGTH_SHORT).show();
-                        break;
-                    }
-                }
-                liveSettingItemAdapter.selectItem(position, true, true);
-                Hawk.put(HawkConfig.LIVE_GROUP_INDEX, position);
-                ApiConfig.get().loadLiveApi(livesOBJ);
                 if (mVideoView != null) {
                     mVideoView.release();
                     mVideoView=null;
                 }
+                if(position==Hawk.get(HawkConfig.LIVE_GROUP_INDEX, 0))break;
+                JsonArray live_groups=Hawk.get(HawkConfig.LIVE_GROUP_LIST,new JsonArray());
+                JsonObject livesOBJ = live_groups.get(position).getAsJsonObject();
+                liveSettingItemAdapter.selectItem(position, true, true);
+                Hawk.put(HawkConfig.LIVE_GROUP_INDEX, position);
+                ApiConfig.get().loadLiveApi(livesOBJ);
                 recreate();
                 return;
         }
@@ -1830,28 +1827,13 @@ public class LivePlayActivity extends BaseActivity {
     private void initLiveChannelList() {
         List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
         if (list.isEmpty()) {
-            if(Hawk.get(HawkConfig.LIVE_GROUP_INDEX, 0)!=0){
-                Hawk.put(HawkConfig.LIVE_GROUP_INDEX, 0);
-                JsonArray live_groups=Hawk.get(HawkConfig.LIVE_GROUP_LIST,new JsonArray());
-                if(!live_groups.isEmpty()){
-                    JsonObject livesOBJ = live_groups.get(0).getAsJsonObject();
-                    ApiConfig.get().loadLiveApi(livesOBJ);
-                }else {
-                    Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
-                    finish();
-                    return;
-                }
-            }else {
-                Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
-                finish();
-                return;
-            }
+            setDefaultLiveChannelList();
+            return;
         }
         initLiveObj();
         if (list.size() == 1 && list.get(0).getGroupName().startsWith("http://127.0.0.1")) {
             loadProxyLives(list.get(0).getGroupName());
-        }
-        else {
+        } else {
             liveChannelGroupList.clear();
             liveChannelGroupList.addAll(list);
             showSuccess();
@@ -1864,9 +1846,8 @@ public class LivePlayActivity extends BaseActivity {
             Uri parsedUrl = Uri.parse(url);
             url = new String(Base64.decode(parsedUrl.getQueryParameter("ext"), Base64.DEFAULT | Base64.URL_SAFE | Base64.NO_WRAP), "UTF-8");
         } catch (Throwable th) {
-            if(!url.startsWith("http://127.0.0.1")){
-                Toast.makeText(App.getInstance(), "直播文件错误", Toast.LENGTH_SHORT).show();
-                finish();
+            if (!url.startsWith("http://127.0.0.1")) {
+                setDefaultLiveChannelList();
                 return;
             }
         }
@@ -1875,6 +1856,12 @@ public class LivePlayActivity extends BaseActivity {
         LOG.i("echo-live-url:"+url);
 
         if(url.contains(".py")){
+            if (!hasPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                // 权限不足时，直接设置默认播放列表
+                Toast.makeText(App.getInstance(), "该源需要存储权限", Toast.LENGTH_SHORT).show();
+                setDefaultLiveChannelList();
+                return;
+            }
             String finalUrl = url;
             Runnable waitResponse = new Runnable() {
                 @Override
@@ -1882,7 +1869,7 @@ public class LivePlayActivity extends BaseActivity {
                     ExecutorService executor = Executors.newSingleThreadExecutor();
                     Future<String> future = executor.submit(new Callable<String>() {
                         @Override
-                        public String call() throws Exception {
+                        public String call() {
                             LOG.i("echo--loadProxyLives-json--");
                             Spider sp = ApiConfig.get().getPyCSP(finalUrl);
                             String json=sp.liveContent(finalUrl);
@@ -1892,44 +1879,36 @@ public class LivePlayActivity extends BaseActivity {
                     });
                     String sortJson = null;
                     try {
-                        sortJson = future.get(6, TimeUnit.SECONDS);
+                        sortJson = future.get(10, TimeUnit.SECONDS);
                     } catch (TimeoutException e) {
                         e.printStackTrace();
                         future.cancel(true);
                     } catch (InterruptedException | ExecutionException e) {
                         e.printStackTrace();
                     } finally {
-                        // 将字符串转换为 JSONObject
-//                        try {
-//                            assert sortJson != null;
-//                            JSONObject jsonObject = new JSONObject(sortJson);
-//                            sortJson = jsonObject.getString("liveList");
-//                        } catch (JSONException e) {
-//                            JsonArray live_groups=Hawk.get(HawkConfig.LIVE_GROUP_LIST,new JsonArray());
-//                            Hawk.put(HawkConfig.LIVE_GROUP_INDEX,Hawk.get(HawkConfig.LIVE_GROUP_INDEX,0)+1);
-//                            if(Hawk.get(HawkConfig.LIVE_GROUP_INDEX,0)>live_groups.size()-1){
-//                                Hawk.put(HawkConfig.LIVE_GROUP_INDEX,0);
-//                            }
-//                            mHandler.post(new Runnable() {
-//                                @Override
-//                                public void run() {
-//                                    Toast.makeText(App.getInstance(), "加载错误,请重试", Toast.LENGTH_SHORT).show();
-//
-//                                    jumpActivity(HomeActivity.class);
-//                                }
-//                            });
-//                            return;
-//                        }
-                        JsonArray livesArray;
+                        if (sortJson==null || sortJson.isEmpty()) {
+                            // 频道列表为空时，使用默认播放列表
+                            mHandler.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    setDefaultLiveChannelList();
+                                }
+                            });
+                            return;
+                        }
                         LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>> linkedHashMap = new LinkedHashMap<>();
                         TxtSubscribe.parse(linkedHashMap, sortJson);
-                        livesArray = TxtSubscribe.live2JsonArray(linkedHashMap);
+                        JsonArray livesArray = TxtSubscribe.live2JsonArray(linkedHashMap);
 
                         ApiConfig.get().loadLives(livesArray);
                         List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
                         if (list.isEmpty()) {
-                            Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
-                            finish();
+                            mHandler.post(new Runnable() {
+                                @Override
+                                public void run() {
+                                    setDefaultLiveChannelList();
+                                }
+                            });
                             return;
                         }
                         liveChannelGroupList.clear();
@@ -1962,16 +1941,19 @@ public class LivePlayActivity extends BaseActivity {
 
                 @Override
                 public void onSuccess(Response<String> response) {
-                    JsonArray livesArray;
                     LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>> linkedHashMap = new LinkedHashMap<>();
                     TxtSubscribe.parse(linkedHashMap, response.body());
-                    livesArray = TxtSubscribe.live2JsonArray(linkedHashMap);
+                    JsonArray livesArray = TxtSubscribe.live2JsonArray(linkedHashMap);
 
                     ApiConfig.get().loadLives(livesArray);
                     List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
                     if (list.isEmpty()) {
-                        Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
-                        finish();
+                        mHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                setDefaultLiveChannelList();
+                            }
+                        });
                         return;
                     }
                     liveChannelGroupList.clear();
@@ -1985,23 +1967,17 @@ public class LivePlayActivity extends BaseActivity {
                         }
                     });
                 }
+
                 @Override
                 public void onError(Response<String> response) {
-                    Toast.makeText(App.getInstance(), "加载错误,请重试", Toast.LENGTH_SHORT).show();
-                    JsonArray live_groups=Hawk.get(HawkConfig.LIVE_GROUP_LIST,new JsonArray());
-                    Hawk.put(HawkConfig.LIVE_GROUP_INDEX,Hawk.get(HawkConfig.LIVE_GROUP_INDEX,0)+1);
-                    if(Hawk.get(HawkConfig.LIVE_GROUP_INDEX,0)>live_groups.size()-1){
-                        Hawk.put(HawkConfig.LIVE_GROUP_INDEX,0);
-                    }
                     mHandler.post(new Runnable() {
                         @Override
                         public void run() {
-                            jumpActivity(HomeActivity.class);
+                            setDefaultLiveChannelList();
                         }
                     });
                 }
             });
-
         }
     }
 
@@ -2407,4 +2383,33 @@ public class LivePlayActivity extends BaseActivity {
         countDownTimer3.start();
     }
 
+    /**
+     * 当播放列表为空或加载失败时，设置一个默认的播放列表，保证播放界面不会崩溃
+     */
+    private void setDefaultLiveChannelList() {
+        liveChannelGroupList.clear();
+        // 创建默认直播分组
+        LiveChannelGroup defaultGroup = new LiveChannelGroup();
+        defaultGroup.setGroupIndex(0);
+        defaultGroup.setGroupName("default group");
+        defaultGroup.setGroupPassword("");
+        LiveChannelItem defaultChannel = new LiveChannelItem();
+        defaultChannel.setChannelName("default channel");
+        defaultChannel.setChannelIndex(0);
+        defaultChannel.setChannelNum(1);
+        ArrayList<String> defaultSourceNames = new ArrayList<>();
+        ArrayList<String> defaultSourceUrls = new ArrayList<>();
+        defaultSourceNames.add("default source");
+        defaultSourceUrls.add("http://default.play.url/stream");
+        defaultChannel.setChannelSourceNames(defaultSourceNames);
+        defaultChannel.setChannelUrls(defaultSourceUrls);
+        // 将默认频道添加到分组内
+        ArrayList<LiveChannelItem> channels = new ArrayList<>();
+        channels.add(defaultChannel);
+        defaultGroup.setLiveChannels(channels);
+        // 添加分组到全局列表
+        liveChannelGroupList.add(defaultGroup);
+        showSuccess();
+        initLiveState();
+    }
 }
