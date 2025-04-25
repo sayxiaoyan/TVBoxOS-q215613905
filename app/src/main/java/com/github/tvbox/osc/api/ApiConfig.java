@@ -1,5 +1,7 @@
 package com.github.tvbox.osc.api;
 
+import static com.github.tvbox.osc.util.RegexUtils.getPattern;
+
 import android.app.Activity;
 import android.net.Uri;
 import android.text.TextUtils;
@@ -112,7 +114,7 @@ public class ApiConfig {
         String content = json;
         try {
             if (AES.isJson(content)) return content;
-            Pattern pattern = Pattern.compile("[A-Za-z0]{8}\\*\\*");
+            Pattern pattern = getPattern("[A-Za-z0]{8}\\*\\*");
             Matcher matcher = pattern.matcher(content);
             if(matcher.find()){
                 content=content.substring(content.indexOf(matcher.group()) + 10);
@@ -137,7 +139,7 @@ public class ApiConfig {
     }
 
     private static byte[] getImgJar(String body){
-        Pattern pattern = Pattern.compile("[A-Za-z0]{8}\\*\\*");
+        Pattern pattern = getPattern("[A-Za-z0]{8}\\*\\*");
         Matcher matcher = pattern.matcher(body);
         if(matcher.find()){
             body = body.substring(body.indexOf(matcher.group()) + 10);
@@ -547,6 +549,7 @@ public class ApiConfig {
             VideoParseRuler.clearRule();
             for(JsonElement oneHostRule : infoJson.getAsJsonArray("rules")) {
                 JsonObject obj = (JsonObject) oneHostRule;
+                //嗅探过滤规则
                 if (obj.has("host")) {
                     String host = obj.get("host").getAsString();
                     if (obj.has("rule")) {
@@ -572,6 +575,7 @@ public class ApiConfig {
                         }
                     }
                 }
+                //广告过滤规则
                 if (obj.has("hosts") && obj.has("regex")) {
                     ArrayList<String> rule = new ArrayList<>();
                     ArrayList<String> ads = new ArrayList<>();
@@ -586,6 +590,20 @@ public class ApiConfig {
                         String host = one.getAsString();
                         VideoParseRuler.addHostRule(host, rule);
                         VideoParseRuler.addHostRegex(host, ads);
+                    }
+                }
+                //嗅探脚本规则 如 click
+                if (obj.has("hosts") && obj.has("script")) {
+                    ArrayList<String> scripts = new ArrayList<>();
+                    JsonArray scriptArray = obj.getAsJsonArray("script");
+                    for (JsonElement one : scriptArray) {
+                        String script = one.getAsString();
+                        scripts.add(script);
+                    }
+                    JsonArray array = obj.getAsJsonArray("hosts");
+                    for (JsonElement one : array) {
+                        String host = one.getAsString();
+                        VideoParseRuler.addHostScript(host, scripts);
                     }
                 }
             }
@@ -858,11 +876,15 @@ public class ApiConfig {
             if(livesOBJ.has("epg")){
                 String epg =livesOBJ.get("epg").getAsString();
                 Hawk.put(HawkConfig.EPG_URL,epg);
+            }else {
+                Hawk.put(HawkConfig.EPG_URL,"");
             }
             //直播播放器类型
             if(livesOBJ.has("playerType")){
                 String livePlayType =livesOBJ.get("playerType").getAsString();
                 Hawk.put(HawkConfig.LIVE_PLAY_TYPE,livePlayType);
+            }else {
+                Hawk.put(HawkConfig.LIVE_PLAY_TYPE,Hawk.get(HawkConfig.PLAY_TYPE, 0));
             }
             //设置UA
             if(livesOBJ.has("header")) {
@@ -919,22 +941,18 @@ public class ApiConfig {
         return pyLoader.getSpider(MD5.string2MD5(url), url, "");
     }
 
-    public Object[] proxyLocal(Map<String,String> param){
-        SourceBean sourceBean = ApiConfig.get().getHomeSourceBean();
-
-        if(Hawk.get(HawkConfig.PLAYER_IS_LIVE,false)){
-            if(currentLiveSpider.contains(".py")){
-                return pyLoader.proxyInvoke(param);
-            }else {
-                return jarLoader.proxyInvoke(param);
-            }
-        }else {
-            if (sourceBean.getApi().contains(".py")) {
-                return pyLoader.proxyInvoke(param);
-            }else {
-                return jarLoader.proxyInvoke(param);
-            }
+    public Object[] proxyLocal(Map<String, String> param) {
+        if ("js".equals(param.get("do"))) {
+            return jsLoader.proxyInvoke(param);
         }
+        String apiString;
+        if (Hawk.get(HawkConfig.PLAYER_IS_LIVE, false)) {
+            apiString = currentLiveSpider;
+        } else {
+            SourceBean sourceBean = ApiConfig.get().getHomeSourceBean();
+            apiString = sourceBean.getApi();
+        }
+        return apiString.contains(".py") ? pyLoader.proxyInvoke(param) : jarLoader.proxyInvoke(param);
     }
 
     public JSONObject jsonExt(String key, LinkedHashMap<String, String> jxs, String url) {
@@ -1090,5 +1108,6 @@ public class ApiConfig {
     public void clearLoader(){
         jarLoader.clear();
         pyLoader.clear();
+        jsLoader.clear();
     }
 }
